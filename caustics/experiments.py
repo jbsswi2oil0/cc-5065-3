@@ -1,8 +1,10 @@
 """Experiment harness: budgets, convergence, bias and energy bookkeeping."""
+from .diagnostics import diagnose, summarize_issues
 from .photon import trace_photons
 from .refine import refinement_stats
 from .renderer import render
 from .scene import build_scene
+from .spatial import DEFAULT_BACKEND, DEFAULT_QUERY_MODE
 
 
 def total_irradiance(view):
@@ -68,9 +70,12 @@ def smoothness_scale(view):
 
 def run_experiment(pane_x=0.0, pane_z=0.0, n_photons=40000, radius=0.12,
                    max_radius=0.45, kernel="epanechnikov", adaptive=True,
-                   seed=12345):
+                   seed=12345, index_backend=DEFAULT_BACKEND,
+                   index_query_mode=DEFAULT_QUERY_MODE):
     scene = build_scene(pane_x, pane_z)
-    tracer = trace_photons(scene, n_photons, seed=seed)
+    tracer = trace_photons(scene, n_photons, seed=seed,
+                           index_backend=index_backend,
+                           index_query_mode=index_query_mode)
     views = render(tracer, radius, max_radius, kernel, adaptive)
     result = {"views": views, "tracer_summary": _summary(tracer)}
     for sid, view in views.items():
@@ -86,6 +91,8 @@ def run_experiment(pane_x=0.0, pane_z=0.0, n_photons=40000, radius=0.12,
             "smoothness_scale": smoothness_scale(view),
             "spot": peak_spot(view),
         }
+    result["diagnostics"] = summarize_issues(diagnose(
+        views["wall.front"], views["wall.back"], result["tracer_summary"]))
     return result
 
 
@@ -114,6 +121,7 @@ def _summary(tracer):
             "wall.front": tracer["caustic"].count("wall.front"),
             "wall.back": tracer["caustic"].count("wall.back"),
         },
+        "index": tracer["index"],
     }
 
 

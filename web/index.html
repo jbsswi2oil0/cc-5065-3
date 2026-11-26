@@ -63,6 +63,17 @@
   .status.warn { border-color:var(--warn); color:var(--warn); }
   .status.bad { border-color:var(--bad); color:var(--bad); }
   .status.good { border-color:var(--good); color:var(--good); }
+  .status .idx { color:var(--muted); }
+  .anom { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  .anom .item { font-size:12px; padding:7px 9px; border-radius:6px;
+                background:#0e1219; border:1px solid var(--line); }
+  .anom .item.warn { border-color:var(--warn); }
+  .anom .item.bad { border-color:var(--bad); }
+  .anom .item .area { font-size:10px; text-transform:uppercase;
+                      letter-spacing:.06em; margin-right:6px; }
+  .anom .item.spot .area { color:var(--accent); }
+  .anom .item.estimate .area { color:var(--warn); }
+  .anom .empty { color:var(--good); font-size:12px; }
   .hint { color:var(--muted); font-size:11px; }
   .err { color:var(--bad); white-space:pre-wrap; }
   .section-title { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
@@ -72,7 +83,7 @@
 <body>
 <header>
   <h1>聚焦光斑 · 光子映射渲染器</h1>
-  <span class="sub">真实光线追踪 + 哈希网格光子图 + 核密度估计（纯 Python 标准库，无预制纹理）</span>
+  <span class="sub">真实光线追踪 + 光子图邻域索引（kd-tree，含旧哈希网格可切换）+ 核密度估计（纯 Python 标准库，无预制纹理）</span>
 </header>
 
 <div class="layout">
@@ -112,6 +123,14 @@
     </div>
     <label class="check"><input type="checkbox" id="adaptive" checked>
       按有效光子数自适应放大半径（细化器闭环）</label>
+
+    <div>
+      <label>光子邻域索引</label>
+      <select id="indexBackend">
+        <option value="kdtree">kd-tree（迁移后默认，精确半径过滤）</option>
+        <option value="hash_grid">哈希网格（旧实现，对照用）</option>
+      </select>
+    </div>
 
     <div>
       <label>随机种子</label>
@@ -166,6 +185,9 @@
     <div class="panel">
       <p class="section-title">能量守恒与估计误差</p>
       <div class="metrics" id="globalMetrics"></div>
+      <div class="status" id="estimateStatus" style="margin-top:12px">引导：点击“重新追踪并渲染”。</div>
+      <p class="section-title" style="margin-top:14px">聚焦光斑 / 估计异常</p>
+      <div class="anom" id="anomalies"><span class="empty">尚无诊断结果。</span></div>
     </div>
 
     <div class="panel">
@@ -184,7 +206,8 @@
 const $ = id => document.getElementById(id);
 const state = { data:null, layers:{front:"total", back:"total"} };
 const DEFAULTS = { budget:40000, paneX:0, paneZ:0, radius:0.12,
-                   maxRadius:0.45, kernel:"epanechnikov", adaptive:true, seed:12345 };
+                   maxRadius:0.45, kernel:"epanechnikov", adaptive:true,
+                   indexBackend:"kdtree", seed:12345 };
 
 function syncLabels() {
   $("budgetValue").textContent = Number($("budget").value).toLocaleString();
@@ -211,6 +234,7 @@ function readParams() {
     maxRadius: Number($("maxRadius").value),
     kernel: $("kernel").value,
     adaptive: $("adaptive").checked,
+    indexBackend: $("indexBackend").value,
     seed: Number($("seed").value) || 12345,
   };
 }
@@ -317,10 +341,13 @@ function drawFace(face, sid, view) {
 
 function fillGlobal(data) {
   const s = data.summary;
-  const front = data.views["wall.front"], back = data.views["wall.back"];
+  const back = data.views["wall.back"];
+  const idx = data.index || {};
   const residual = s.bookkeeping_residual;
   const kind = Math.abs(residual) < 1e-3 ? "good"
              : Math.abs(residual) < 1e-1 ? "warn" : "bad";
+  const modeLabel = idx.backend === "kdtree"
+    ? `kd-tree/${idx.query_mode}` : (idx.backend || "?");
   const cards = [
     ["发射光子", s.n_photons.toLocaleString()],
     ["直接/焦散光子", `${s.direct_photons.toLocaleString()} / ${s.caustic_photons.toLocaleString()}`],
@@ -328,18 +355,35 @@ function fillGlobal(data) {
     ["能量记账残差", fmt(residual,5)],
     ["背面焦散泄漏", back.metrics.caustic_irradiance.toExponential(2)],
     ["存储能量占比", fmt(s.stored_fraction,3)],
+    ["邻域索引", modeLabel],
+    ["索引版本", idx.version || "?"],
   ];
   $("globalMetrics").innerHTML = cards.map(([k,v]) =>
     `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-  const under = front.refine.fraction_undersampled;
-  if (back.metrics.caustic_irradiance > 1e-9)
-    setStatus("警告：检测到墙背面焦散泄漏！", "bad");
-  else if (under > 0.35)
-    setStatus(`估计器反馈：${(under*100).toFixed(1)}% 像素欠采样，建议提高光子预算或放宽上限半径。`, "warn");
-  else
-    setStatus("估计器状态良好：能量守恒闭合，背面无泄漏，样本充足。", "good");
-  $("globalMetrics").firstChild &&
-    ($("globalMetrics").children[3].className = "metric " + kind);
+  $("globalMetrics").children[3].className = "metric " + kind;
+  renderAnomalies(data);
+}
+
+function renderAnomalies(data) {
+  const box = $("anomalies");
+  const d = data.diagnostics || { issues: [], status: "ok" };
+  const st = $("estimateStatus");
+  if (d.status === "ok" || !d.issues.length) {
+    box.innerHTML = `<span class="empty">未检测到聚焦光斑或估计误差异常。</span>`;
+    st.className = "status good";
+    st.textContent = "估计器状态良好：能量闭合、无背面泄漏、样本充足。";
+    return;
+  }
+  const areaName = { spot: "聚焦光斑", estimate: "估计误差" };
+  box.innerHTML = d.issues.map(it =>
+    `<div class="item ${it.severity} ${it.area}">
+       <span class="area">${areaName[it.area] || it.area}</span>${it.message}</div>`
+  ).join("");
+  const bad = d.status === "bad";
+  st.className = "status " + (bad ? "bad" : "warn");
+  st.textContent = bad
+    ? `估计误差/光斑异常：${d.by_area.spot} 项光斑、${d.by_area.estimate} 项估计。`
+    : `提示：${d.by_area.spot} 项光斑、${d.by_area.estimate} 项估计需关注。`;
 }
 
 document.querySelectorAll(".layerbar").forEach(bar => {
@@ -362,7 +406,13 @@ async function doRender() {
   try {
     state.data = await postJSON("/api/render", readParams());
     renderAll();
-    setStatus(`渲染完成，用时 ${((performance.now()-t0)/1000).toFixed(1)}s。`, "good");
+    const idx = state.data.index || {};
+    const mode = idx.backend === "kdtree"
+      ? `kd-tree/${idx.query_mode}` : (idx.backend || "?");
+    const d = state.data.diagnostics || { count: 0 };
+    const anom = d.count ? `，${d.count} 项待关注异常` : "，无异常";
+    setStatus(`渲染完成（索引 ${mode}），用时 ${((performance.now()-t0)/1000).toFixed(1)}s${anom}。`,
+              d.status === "bad" ? "bad" : d.status === "warn" ? "warn" : "good");
   } catch (e) {
     $("errorBox").textContent = "渲染失败（已反馈回估计器）：" + e.message;
     setStatus("渲染失败，请检查参数。", "bad");

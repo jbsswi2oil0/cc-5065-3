@@ -1,4 +1,4 @@
-"""Photon path tracing and a hash-grid photon map with neighborhood queries.
+"""Photon path tracing and a photon map with indexed neighborhood queries.
 
 Every photon carries an explicit RGB power (flux).  At dielectric events the
 Fresnel reflectance drives a *random* reflection/refraction choice and the
@@ -15,6 +15,9 @@ import random
 from . import vec3
 from .materials import fresnel_schlick, refract
 from .scene import AIR_IOR, RECEIVER_IDS
+from .spatial import (BOUNDARY_RULE, DEFAULT_BACKEND, DEFAULT_QUERY_MODE,
+                      INDEX_VERSION, NEIGHBORHOOD_INDEX_MIGRATION,
+                      KdPhotonIndex, make_index)
 
 EPS = 1.0e-4
 MAX_BOUNCES = 24
@@ -31,57 +34,11 @@ class Photon:
         self.surface_id = surface_id
 
 
-class PhotonMap:
-    """Hash grid over photon positions; each surface id gets its own grid."""
-
-    def __init__(self, cell_size):
-        self.cell = float(cell_size)
-        self.photons = []
-        self.grids = {}          # surface_id -> dict[(ix,iy,iz)] -> list[idx]
-
-    def add(self, photon):
-        idx = len(self.photons)
-        self.photons.append(photon)
-        grid = self.grids.setdefault(photon.surface_id, {})
-        c = self.cell
-        key = (int(math.floor(photon.pos[0] / c)),
-               int(math.floor(photon.pos[1] / c)),
-               int(math.floor(photon.pos[2] / c)))
-        grid.setdefault(key, []).append(idx)
-
-    def neighborhood(self, center, radius, surface_id):
-        """Return photons of one surface id within `radius` of `center`."""
-        grid = self.grids.get(surface_id)
-        if grid is None:
-            return ()
-        c = self.cell
-        x0 = int(math.floor((center[0] - radius) / c))
-        x1 = int(math.floor((center[0] + radius) / c))
-        y0 = int(math.floor((center[1] - radius) / c))
-        y1 = int(math.floor((center[1] + radius) / c))
-        z0 = int(math.floor((center[2] - radius) / c))
-        z1 = int(math.floor((center[2] + radius) / c))
-        r2 = radius * radius
-        out = []
-        for ix in range(x0, x1 + 1):
-            for iy in range(y0, y1 + 1):
-                for iz in range(z0, z1 + 1):
-                    bucket = grid.get((ix, iy, iz))
-                    if not bucket:
-                        continue
-                    for j in bucket:
-                        ph = self.photons[j]
-                        dx = ph.pos[0] - center[0]
-                        dy = ph.pos[1] - center[1]
-                        dz = ph.pos[2] - center[2]
-                        if dx * dx + dy * dy + dz * dz <= r2:
-                            out.append(ph)
-        return out
-
-    def count(self, surface_id=None):
-        if surface_id is None:
-            return len(self.photons)
-        return sum(len(v) for v in self.grids.get(surface_id, {}).values())
+# ``PhotonMap`` keeps its historic name and constructor so existing call sites
+# and tests keep working; it now resolves to the migrated kd-tree index.  The
+# pre-migration hash grid is still reachable as ``HashPhotonIndex`` (pass
+# ``index_backend="hash_grid"`` to trace_photons) for side-by-side comparison.
+PhotonMap = KdPhotonIndex
 
 
 def _nearest_hit(primitives, o, d, tmax=1.0e6):
@@ -113,15 +70,20 @@ def _cosine_hemisphere(n, rng):
 
 
 def trace_photons(scene, n_photons, beam_power=1.0, seed=12345,
-                  grid_cell=0.08):
-    """Emit `n_photons` beam photons; return direct and caustic photon maps."""
+                  grid_cell=0.08, index_backend=DEFAULT_BACKEND,
+                  index_query_mode=DEFAULT_QUERY_MODE):
+    """Emit `n_photons` beam photons; return direct and caustic photon maps.
+
+    ``index_backend`` selects the neighborhood index: ``"kdtree"`` (migrated
+    default), ``"hash_grid"`` (legacy) or ``"brute_force"`` (audit oracle).
+    """
     rng = random.Random(seed)
     prims = scene["primitives"]
     glass = scene["glass"]
     from .scene import BEAM_HX, BEAM_HZ, EMIT_Y
 
-    direct = PhotonMap(grid_cell)
-    caustic = PhotonMap(grid_cell)
+    direct = make_index(index_backend, grid_cell, query_mode=index_query_mode)
+    caustic = make_index(index_backend, grid_cell, query_mode=index_query_mode)
     w = (beam_power / n_photons,) * 3
 
     emitted_energy = [0.0, 0.0, 0.0]
@@ -227,4 +189,12 @@ def trace_photons(scene, n_photons, beam_power=1.0, seed=12345,
         "alive_energy": alive_energy,
         "per_photon_power": w,
         "n_photons": n_photons,
+        "index": {
+            "backend": index_backend,
+            "query_mode": (index_query_mode if index_backend == "kdtree"
+                           else "bucket_refilter"),
+            "version": INDEX_VERSION,
+            "migration": NEIGHBORHOOD_INDEX_MIGRATION,
+            "boundary_rule": BOUNDARY_RULE,
+        },
     }

@@ -60,6 +60,18 @@ def main():
           f"  alive={sum(s['alive_energy']):.4f}")
     print(f"  bookkeeping_residual={s['bookkeeping_residual']:.2e}")
 
+    print("\n== 邻域索引迁移与估计诊断 ==")
+    idx = s["index"]
+    print(f"  index={idx['backend']}  query_mode={idx['query_mode']}"
+          f"  version={idx['version']}  migration={idx['migration']}")
+    print(f"  boundary_rule={idx['boundary_rule']}")
+    diag = r["diagnostics"]
+    print(f"  diagnostics: status={diag['status']}  count={diag['count']}"
+          f"  (spot={diag['by_area']['spot']},"
+          f" estimate={diag['by_area']['estimate']})")
+    for it in diag["issues"]:
+        print(f"    [{it['severity']}/{it['area']}] {it['code']}: {it['message']}")
+
 
 if __name__ == "__main__":
     main()

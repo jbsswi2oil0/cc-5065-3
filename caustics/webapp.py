@@ -15,12 +15,14 @@ photon budget and kernel controls and feeds the estimator's failure flags
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .diagnostics import diagnose, summarize_issues
 from .experiments import (convergence, caustic_irradiance, peak_spot,
                           smoothness_scale, total_irradiance, _summary)
 from .photon import trace_photons
 from .refine import refinement_stats
 from .renderer import render
 from .scene import build_scene
+from .spatial import DEFAULT_BACKEND, DEFAULT_QUERY_MODE
 
 DEFAULT_BUDGET = 40000
 MAX_BUDGET = 300000
@@ -34,6 +36,8 @@ DEFAULTS = {
     "kernel": "epanechnikov",
     "adaptive": True,
     "seed": 12345,
+    "indexBackend": DEFAULT_BACKEND,
+    "indexQueryMode": DEFAULT_QUERY_MODE,
 }
 
 
@@ -80,9 +84,17 @@ def build_payload(body):
         kernel = "epanechnikov"
     adaptive = bool(body.get("adaptive", True))
     seed = int(_numeric(body, "seed", 12345, 1, 10 ** 9))
+    index_backend = body.get("indexBackend", DEFAULT_BACKEND)
+    if index_backend not in ("kdtree", "hash_grid", "brute_force"):
+        index_backend = DEFAULT_BACKEND
+    index_query_mode = body.get("indexQueryMode", DEFAULT_QUERY_MODE)
+    if index_query_mode not in ("sphere", "bucket"):
+        index_query_mode = DEFAULT_QUERY_MODE
 
     scene = build_scene(pane_x, pane_z)
-    tracer = trace_photons(scene, budget, seed=seed)
+    tracer = trace_photons(scene, budget, seed=seed,
+                           index_backend=index_backend,
+                           index_query_mode=index_query_mode)
     views_raw = render(tracer, radius, max_radius, kernel, adaptive)
     summary = _summary(tracer)
 
@@ -119,9 +131,14 @@ def build_payload(body):
             "causticPoints": _photon_points(tracer["caustic"], sid),
         }
     return {"views": views, "summary": summary,
+            "index": tracer["index"],
+            "diagnostics": summarize_issues(diagnose(
+                views_raw["wall.front"], views_raw["wall.back"], summary)),
             "params": {"budget": budget, "paneX": pane_x, "paneZ": pane_z,
                        "radius": radius, "maxRadius": max_radius,
-                       "kernel": kernel, "adaptive": adaptive, "seed": seed}}
+                       "kernel": kernel, "adaptive": adaptive, "seed": seed,
+                       "indexBackend": index_backend,
+                       "indexQueryMode": index_query_mode}}
 
 
 def build_convergence(body):
@@ -147,6 +164,8 @@ def build_convergence(body):
         kernel=body.get("kernel", "epanechnikov"),
         adaptive=bool(body.get("adaptive", True)),
         seed=int(_numeric(body, "seed", 12345, 1, 10 ** 9)),
+        index_backend=body.get("indexBackend", DEFAULT_BACKEND),
+        index_query_mode=body.get("indexQueryMode", DEFAULT_QUERY_MODE),
     )
     return {"rows": rows, "budgets": budgets}
 

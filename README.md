@@ -18,16 +18,21 @@ python3 run_server.py --port 8011
 浏览器打开打印出的地址即可。界面上可以：
 
 - 修改**光子预算**（1k–200k）、窗棂 X/Z 位移、核函数（Epanechnikov / 高斯 / 盒核）、
-  基础半径、自适应上限半径、随机种子，然后重新追踪渲染；
+  基础半径、自适应上限半径、**光子邻域索引后端**、随机种子，然后重新追踪渲染；
 - 对窗台正面与隔墙背面分别切换图层：**最终图像 / 仅焦散 / 仅直接光 / 光子分布 /
   估计器状态**（充足=绿、欠采样=橙、真暗或预算耗尽=红）；
 - 查看每面的焦散积分能量、峰值辐照度、光斑质心、平均足迹（平滑尺度）、欠采样/真暗像素比例；
-- 顶部卡片显示每光子权重、能量记账残差、**背面焦散泄漏量**；
+- 顶部卡片显示每光子权重、能量记账残差、**背面焦散泄漏量**、**当前邻域索引与版本**；
 - “预算收敛实验”按钮一次渲染多档 N，给出归一化能量比、峰值、足迹、欠采样比例与记账残差；
+- 渲染完成后在“聚焦光斑 / 估计异常”面板列出**光斑异常**（无焦散、聚焦不足、光斑移出取样窗）
+  与**估计误差异常**（记账残差超限、背面泄漏、欠采样过多、预算耗尽、伪真暗）；
 - 当欠采样比例过高或检测到背面泄漏时，状态栏会把估计器的失败标志**反馈回界面**，
   提示提高预算或放宽半径（估计器 → 控件 → 重新估计的闭环）。
 
-### 2. 命令行实验报告（不启动界面）
+> 图形入口即上面的网页实验界面。命令行（`run_experiment_cli.py`）仅作辅助报告，
+> 不替代图形界面对估计器状态与异常的可见反馈。
+
+### 2. 命令行实验报告（不启动界面，仅辅助）
 
 ```bash
 python3 run_experiment_cli.py
@@ -42,7 +47,15 @@ python3 -m unittest discover -s tests -v
 ```
 
 覆盖核函数单位面积、估计器面积归一化、功率线性、法线相容性、薄墙泄漏隔离、
-能量守恒、预算收敛稳定性、窗棂位移、真实聚焦对照共 11 项。
+能量守恒、预算收敛稳定性、窗棂位移、真实聚焦对照，以及**邻域索引迁移**
+（边界/重合光子精确性、新旧索引有效样本一致性、迁移元数据、诊断语义）共 27 项。
+
+### 4. 索引基准（可选）
+
+```bash
+python3 benchmarks/index_bench.py          # 单档：四种策略耗时/候选数/与暴力一致性
+python3 benchmarks/index_bench_sweep.py    # 多档预算×半径×种子，决定 sphere/bucket
+```
 
 ## 代码结构
 
@@ -53,9 +66,11 @@ python3 -m unittest discover -s tests -v
 | `caustics/materials.py` | 材质、Fresnel 反射率、Snell 折射 |
 | `caustics/primitives.py` | 球面 / 轴对齐盒体 / 平面的光线求交，盒体六个面各自带 surface id |
 | `caustics/scene.py` | 薄墙接收面、玻璃板、球形透镜、准直光束的场景定义 |
-| `caustics/photon.py` | 光子路径追踪（Fresnel 随机反射折射、权重折叠、RR）、哈希网格光子图与邻域查询 |
+| `caustics/photon.py` | 光子路径追踪（Fresnel 随机反射折射、权重折叠、RR）、光子图与邻域查询入口 |
+| `caustics/spatial.py` | **光子邻域索引**：kd-tree（迁移后默认，精确半径/桶粗查两种查询）与旧哈希网格、暴力基准 |
 | `caustics/estimator.py` | 核密度辐照度估计：面积归一化、法线相容性、自适应半径、足迹与有效光子数 |
 | `caustics/refine.py` | 细化器：区分“确实很暗 / 采样不足 / 充足” |
+| `caustics/diagnostics.py` | 渲染后**聚焦光斑异常**与**估计误差异常**的后处理诊断（供界面/CLI/测试共用） |
 | `caustics/renderer.py` | 对正反两面正交采样，直接光与焦散分开累加，杜绝重复计数 |
 | `caustics/experiments.py` | 偏差、平滑尺度、能量、收敛等度量与实验编排 |
 | `caustics/webapp.py` | 标准库 `http.server` 后端，`/api/render`、`/api/convergence` |
@@ -81,3 +96,30 @@ python3 -m unittest discover -s tests -v
    通量保持不变（同一核函数、同一 1/R² 归一化）。
 7. **能量闭环**。每个发射光子的最终命运记为吸收 / 逃逸 / 达到反弹上限仍存活，
    玻璃事件未跟随的另一分支也计入吸收，记账残差数值上约为 1e-14。
+
+## 光子邻域索引迁移（`caustics/spatial.py`）
+
+旧实现是**均匀哈希网格**：按查询球的轴对齐包围盒展开整数单元做**桶粗查**，再逐光子做
+精确距离**复筛**。迁移后默认使用**平衡中位切分 kd-tree**（每个 surface id 一棵，惰性构建）。
+`PhotonMap` 名称与构造签名保留，现指向 `KdPhotonIndex`；需要跑旧实现时向
+`trace_photons`/`run_experiment` 传 `index_backend="hash_grid"`。
+
+**精确半径过滤 vs 桶粗查+复筛的选择**: 由实测决定，而非假设。两种 kd-tree 查询模式
+（`query_mode="sphere"` / `"bucket"`）都返回**同一精确集合**；性能在
+`benchmarks/index_bench_sweep.py` 中以 3 档预算 × 4 档半径 × 3 个种子、每配置 2500
+次真实渲染查询评测：`sphere` 平均 0.826s，`bucket` 0.879s，故默认取 `sphere`
+（结构上也更优：距查询点 > R 的包围盒不可能含球内光子，`sphere` 保留的节点是
+`bucket` 的子集）。重新评测：`python3 benchmarks/index_bench_sweep.py`。
+
+**半径 / 距离单位 / 边界规则**：`radius` 是与 `photon.pos` 同单位的世界距离；内部用平方距离
+比较以避免 `sqrt` 舍入。边界为**包含**（`distance <= radius`，见 `BOUNDARY_RULE`）；
+所有后端与两种查询模式都遵守。kd-tree 的节点包围盒距离判定与 AABB 重叠判定都用
+`<=`/闭区间，确保恰在球面边界（含包围盒角点）的光子在被精确测试前不会被剪掉。
+
+**新旧有效样本核对**：`tests/test_spatial_index.py` 用解析半径壳（8 个恰在半径 R 的环上
+光子 + 1 个略在环外）、重合光子、逐轴内/外边界以及随机查询，对哈希网格 / kd-tree 两种
+模式 / 暴力基准核对集合逐一相等；并对迁移前后估计器逐像素的 `n_eff`、`radius`、欠采样与
+预算标志要求**完全相等**，对连续辐照度测量相对偏差并约束在 `1e-12` 内（差异仅来自同一
+光子集的不同求和顺序，约 `1e-16`）。迁移元数据随 tracer 结果返回：
+`index.backend / query_mode / version / migration / boundary_rule`（当前
+`version=2.0`、`migration=kdtree-2026-11`），界面与 CLI 都会显示。
