@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>光子映射焦散实验台</title>
+<style>
+  :root {
+    --bg:#10131a; --panel:#181d27; --line:#2a3242; --fg:#d7deea;
+    --muted:#8a95a8; --accent:#5db3ff; --warn:#ffb84d; --bad:#ff6b6b;
+    --good:#57d18b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 -apple-system,Segoe UI,Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .layout { display:grid; grid-template-columns:300px 1fr; gap:16px; padding:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:14px; }
+  .controls { display:flex; flex-direction:column; gap:12px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  input[type=range] { width:100%; }
+  select,input[type=number] { width:100%; background:#0e1219; color:var(--fg);
+        border:1px solid var(--line); border-radius:6px; padding:6px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .val { float:right; color:var(--accent); font-variant-numeric:tabular-nums; }
+  button { background:var(--accent); color:#06121f; border:0; border-radius:7px;
+           padding:9px 12px; font-weight:600; cursor:pointer; }
+  button.secondary { background:#2b3445; color:var(--fg); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .check { display:flex; align-items:center; gap:8px; color:var(--fg); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .face h3 { margin:0 0 8px; font-size:13px; display:flex; justify-content:space-between; }
+  canvas { width:100%; aspect-ratio:1; background:#05070b; border:1px solid var(--line);
+           border-radius:8px; image-rendering:pixelated; }
+  .layerbar { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  .layerbar button { padding:4px 9px; font-size:11px; font-weight:500;
+           background:#2b3445; color:var(--muted); }
+  .layerbar button.active { background:var(--accent); color:#06121f; }
+  .stats { font-size:11.5px; color:var(--muted); display:grid;
+           grid-template-columns:1fr 1fr; gap:2px 10px; margin-top:8px; }
+  .stats b { color:var(--fg); font-weight:600; font-variant-numeric:tabular-nums; }
+  .legend { display:flex; gap:12px; font-size:11px; color:var(--muted);
+            margin-top:6px; flex-wrap:wrap; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
+        margin-right:4px; vertical-align:-1px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:5px 6px; border-bottom:1px solid var(--line); text-align:right;
+          font-variant-numeric:tabular-nums; }
+  th:first-child,td:first-child { text-align:left; }
+  .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+             gap:10px; margin-top:10px; }
+  .metric { background:#0e1219; border:1px solid var(--line); border-radius:8px;
+            padding:9px; }
+  .metric .k { color:var(--muted); font-size:11px; }
+  .metric .v { font-size:16px; font-weight:600; margin-top:2px;
+               font-variant-numeric:tabular-nums; }
+  .status { font-size:12px; padding:8px 10px; border-radius:7px; margin-top:10px;
+            background:#0e1219; border:1px solid var(--line); }
+  .status.warn { border-color:var(--warn); color:var(--warn); }
+  .status.bad { border-color:var(--bad); color:var(--bad); }
+  .status.good { border-color:var(--good); color:var(--good); }
+  .hint { color:var(--muted); font-size:11px; }
+  .err { color:var(--bad); white-space:pre-wrap; }
+  .section-title { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
+                   color:var(--muted); margin:0 0 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>聚焦光斑 · 光子映射渲染器</h1>
+  <span class="sub">真实光线追踪 + 哈希网格光子图 + 核密度估计（纯 Python 标准库，无预制纹理）</span>
+</header>
+
+<div class="layout">
+  <div class="panel controls">
+    <p class="section-title">光子预算与光路</p>
+    <div>
+      <label>发射光子数 <span class="val" id="budgetValue"></span></label>
+      <input type="range" id="budget" min="1000" max="200000" step="1000">
+    </div>
+    <div class="row">
+      <div>
+        <label>窗棂 X 位移 <span class="val" id="paneXValue"></span></label>
+        <input type="range" id="paneX" min="-1.6" max="1.6" step="0.05">
+      </div>
+      <div>
+        <label>窗棂 Z 位移 <span class="val" id="paneZValue"></span></label>
+        <input type="range" id="paneZ" min="-1.6" max="1.6" step="0.05">
+      </div>
+    </div>
+
+    <p class="section-title">估计器内核与尺度</p>
+    <div>
+      <label>核函数</label>
+      <select id="kernel">
+        <option value="epanechnikov">Epanechnikov（二次，默认）</option>
+        <option value="gaussian">截断高斯</option>
+        <option value="box">均匀盒核</option>
+      </select>
+    </div>
+    <div>
+      <label>基础半径 R <span class="val" id="radiusValue"></span></label>
+      <input type="range" id="radius" min="0.03" max="0.4" step="0.01">
+    </div>
+    <div>
+      <label>自适应上限半径 <span class="val" id="maxRadiusValue"></span></label>
+      <input type="range" id="maxRadius" min="0.05" max="0.9" step="0.01">
+    </div>
+    <label class="check"><input type="checkbox" id="adaptive" checked>
+      按有效光子数自适应放大半径（细化器闭环）</label>
+
+    <div>
+      <label>随机种子</label>
+      <input type="number" id="seed" value="12345" min="1" step="1">
+    </div>
+
+    <button id="renderBtn">重新追踪并渲染</button>
+    <button id="convergeBtn" class="secondary">预算收敛实验（多档 N）</button>
+    <p class="hint">拖动窗棂后点渲染，从正反两面取样核对位移、背面泄漏与预算标志。</p>
+    <div id="requestStatus" class="status">等待渲染…</div>
+    <div id="errorBox" class="err"></div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:16px;">
+    <div class="grid2">
+      <div class="panel face">
+        <h3>窗台正面（迎光） <span id="frontTag"></span></h3>
+        <div class="layerbar" data-face="front">
+          <button data-layer="total" class="active">最终图像</button>
+          <button data-layer="caustic">仅焦散</button>
+          <button data-layer="direct">仅直接光</button>
+          <button data-layer="photons">光子分布</button>
+          <button data-layer="status">估计器状态</button>
+        </div>
+        <canvas id="frontCanvas" width="450" height="450"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#57d18b"></i>样本充足</span>
+          <span><i class="sw" style="background:#ffb84d"></i>欠采样</span>
+          <span><i class="sw" style="background:#ff6b6b"></i>预算耗尽/真暗</span>
+        </div>
+        <div class="stats" id="frontStats"></div>
+      </div>
+      <div class="panel face">
+        <h3>隔墙背面（反向） <span id="backTag"></span></h3>
+        <div class="layerbar" data-face="back">
+          <button data-layer="total" class="active">最终图像</button>
+          <button data-layer="caustic">仅焦散</button>
+          <button data-layer="direct">仅直接光</button>
+          <button data-layer="photons">光子分布</button>
+          <button data-layer="status">估计器状态</button>
+        </div>
+        <canvas id="backCanvas" width="450" height="450"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#57d18b"></i>样本充足</span>
+          <span><i class="sw" style="background:#ffb84d"></i>欠采样</span>
+          <span><i class="sw" style="background:#ff6b6b"></i>预算耗尽/真暗</span>
+        </div>
+        <div class="stats" id="backStats"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <p class="section-title">能量守恒与估计误差</p>
+      <div class="metrics" id="globalMetrics"></div>
+    </div>
+
+    <div class="panel">
+      <p class="section-title">预算收敛（归一化后平均能量应稳定，而非随 N 变亮）</p>
+      <div style="overflow:auto"><table id="convergenceTable">
+        <thead><tr>
+          <th>光子数 N</th><th>焦散能量</th><th>相对首档</th><th>峰值辐照度</th>
+          <th>平均足迹</th><th>欠采样比例</th><th>记账残差</th><th>背面光子</th>
+        </tr></thead><tbody></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { data:null, layers:{front:"total", back:"total"} };
+const DEFAULTS = { budget:40000, paneX:0, paneZ:0, radius:0.12,
+                   maxRadius:0.45, kernel:"epanechnikov", adaptive:true, seed:12345 };
+
+function syncLabels() {
+  $("budgetValue").textContent = Number($("budget").value).toLocaleString();
+  $("paneXValue").textContent = Number($("paneX").value).toFixed(2);
+  $("paneZValue").textContent = Number($("paneZ").value).toFixed(2);
+  $("radiusValue").textContent = Number($("radius").value).toFixed(2);
+  $("maxRadiusValue").textContent = Number($("maxRadius").value).toFixed(2);
+}
+Object.keys(DEFAULTS).forEach(k => {
+  const el = $(k === "budget" ? "budget" : k);
+  if (el) { if (typeof DEFAULTS[k] === "boolean") el.checked = DEFAULTS[k];
+            else el.value = DEFAULTS[k]; }
+});
+["budget","paneX","paneZ","radius","maxRadius"].forEach(id =>
+  $(id).addEventListener("input", syncLabels));
+syncLabels();
+
+function readParams() {
+  return {
+    budget: Number($("budget").value),
+    paneX: Number($("paneX").value),
+    paneZ: Number($("paneZ").value),
+    radius: Number($("radius").value),
+    maxRadius: Number($("maxRadius").value),
+    kernel: $("kernel").value,
+    adaptive: $("adaptive").checked,
+    seed: Number($("seed").value) || 12345,
+  };
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, { method:"POST",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error + ": " + (json.detail || ""));
+  return json;
+}
+
+function setStatus(text, kind) {
+  const el = $("requestStatus");
+  el.textContent = text;
+  el.className = "status" + (kind ? " " + kind : "");
+}
+
+function colorFor(rgb, scale) {
+  const g = v => Math.max(0, Math.min(255, Math.round(255 * (v / scale))));
+  return [g(rgb[0]), g(rgb[1]), g(rgb[2])];
+}
+
+function drawImage(canvas, view, layer) {
+  const n = view.gridN, ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(n, n);
+  let scale = 1e-9;
+  if (layer === "total" || layer === "caustic" || layer === "direct") {
+    for (const row of view[layer])
+      for (const px of row)
+        scale = Math.max(scale, px[0], px[1], px[2]);
+  }
+  // Common 98th-percentile style scale keeps low-energy detail visible.
+  if (layer !== "photons" && layer !== "status") {
+    const all = [];
+    for (const row of view[layer]) for (const px of row)
+      all.push(Math.max(px[0], px[1], px[2]));
+    all.sort((a,b)=>a-b);
+    scale = all[Math.floor(all.length*0.98)] || scale;
+  }
+  for (let y=0; y<n; y++) {
+    for (let x=0; x<n; x++) {
+      let r=0,g=0,b=0;
+      if (layer === "photons") { r=g=b=8; }
+      else if (layer === "status") {
+        const lab = view.labels[y][x];
+        if (lab === "ok") [r,g,b]=[24,80,45];
+        else if (lab === "undersampled") [r,g,b]=[120,80,15];
+        else [r,g,b]=[90,25,25];
+      } else {
+        [r,g,b] = colorFor(view[layer][y][x], scale);
+      }
+      const o = (y*n+x)*4;
+      img.data[o]=r; img.data[o+1]=g; img.data[o+2]=b; img.data[o+3]=255;
+    }
+  }
+  // upscale the small estimate grid onto the canvas
+  const small = document.createElement("canvas");
+  small.width = n; small.height = n;
+  small.getContext("2d").putImageData(img,0,0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(small,0,0,canvas.width,canvas.height);
+
+  if (layer === "photons") {
+    const hx = view.viewHx, hz = view.viewHz;
+    ctx.fillStyle = "rgba(93,179,255,0.85)";
+    for (const [wx,wz] of view.causticPoints) {
+      const cx = (wx + hx) / (2*hx) * canvas.width;
+      const cy = (wz + hz) / (2*hz) * canvas.height;
+      ctx.fillRect(cx-1, cy-1, 2, 2);
+    }
+  }
+}
+
+function fmt(x, d=4) { return Number(x).toFixed(d); }
+
+function renderAll() {
+  if (!state.data) return;
+  const v = state.data.views;
+  drawFace("front", "wall.front", v["wall.front"]);
+  drawFace("back", "wall.back", v["wall.back"]);
+  fillGlobal(state.data);
+}
+
+function drawFace(face, sid, view) {
+  drawImage($(face+"Canvas"), view, state.layers[face]);
+  $(face+"Tag").textContent =
+    `焦散光子 ${view.photonCount.toLocaleString()} · 直接光子 ${view.directCount.toLocaleString()}`;
+  const m = view.metrics, rf = view.refine;
+  const rows = [
+    ["焦散积分能量", fmt(m.caustic_irradiance)],
+    ["总辐照能量", fmt(m.total_irradiance)],
+    ["峰值辐照度", fmt(m.spot.peak)],
+    ["光斑质心", `(${fmt(m.spot.centroid[0],2)}, ${fmt(m.spot.centroid[1],2)})`],
+    ["平均足迹 R", fmt(m.smoothness_scale,3)],
+    ["欠采样像素", `${(rf.fraction_undersampled*100).toFixed(1)}%`],
+    ["真暗像素", `${(rf.fraction_dark*100).toFixed(1)}%`],
+    ["充足/欠/暗", `${rf.counts.ok}/${rf.counts.undersampled}/${rf.counts.dark}`],
+  ];
+  $(face+"Stats").innerHTML = rows.map(([k,val]) =>
+    `<span>${k}</span><b>${val}</b>`).join("");
+}
+
+function fillGlobal(data) {
+  const s = data.summary;
+  const front = data.views["wall.front"], back = data.views["wall.back"];
+  const residual = s.bookkeeping_residual;
+  const kind = Math.abs(residual) < 1e-3 ? "good"
+             : Math.abs(residual) < 1e-1 ? "warn" : "bad";
+  const cards = [
+    ["发射光子", s.n_photons.toLocaleString()],
+    ["直接/焦散光子", `${s.direct_photons.toLocaleString()} / ${s.caustic_photons.toLocaleString()}`],
+    ["每光子权重", fmt(s.per_photon_power[0],6)],
+    ["能量记账残差", fmt(residual,5)],
+    ["背面焦散泄漏", back.metrics.caustic_irradiance.toExponential(2)],
+    ["存储能量占比", fmt(s.stored_fraction,3)],
+  ];
+  $("globalMetrics").innerHTML = cards.map(([k,v]) =>
+    `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  const under = front.refine.fraction_undersampled;
+  if (back.metrics.caustic_irradiance > 1e-9)
+    setStatus("警告：检测到墙背面焦散泄漏！", "bad");
+  else if (under > 0.35)
+    setStatus(`估计器反馈：${(under*100).toFixed(1)}% 像素欠采样，建议提高光子预算或放宽上限半径。`, "warn");
+  else
+    setStatus("估计器状态良好：能量守恒闭合，背面无泄漏，样本充足。", "good");
+  $("globalMetrics").firstChild &&
+    ($("globalMetrics").children[3].className = "metric " + kind);
+}
+
+document.querySelectorAll(".layerbar").forEach(bar => {
+  const face = bar.dataset.face;
+  bar.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      bar.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.layers[face] = btn.dataset.layer;
+      if (state.data) renderAll();
+    });
+  });
+});
+
+async function doRender() {
+  $("errorBox").textContent = "";
+  const btn = $("renderBtn"); btn.disabled = true;
+  setStatus("正在从光源发射光子并估计辐照度…");
+  const t0 = performance.now();
+  try {
+    state.data = await postJSON("/api/render", readParams());
+    renderAll();
+    setStatus(`渲染完成，用时 ${((performance.now()-t0)/1000).toFixed(1)}s。`, "good");
+  } catch (e) {
+    $("errorBox").textContent = "渲染失败（已反馈回估计器）：" + e.message;
+    setStatus("渲染失败，请检查参数。", "bad");
+  } finally { btn.disabled = false; }
+}
+
+async function doConvergence() {
+  $("errorBox").textContent = "";
+  const btn = $("convergeBtn"); btn.disabled = true;
+  setStatus("正在跑多档光子预算收敛实验…");
+  try {
+    const body = readParams();
+    body.budgets = [5000, 10000, 20000, 40000, 80000];
+    const res = await postJSON("/api/convergence", body);
+    const tb = $("convergenceTable").querySelector("tbody");
+    tb.innerHTML = res.rows.map(r => `<tr>
+      <td>${r.n_photons.toLocaleString()}</td>
+      <td>${fmt(r.front_caustic_energy)}</td>
+      <td>${fmt(r.caustic_energy_ratio,3)}</td>
+      <td>${fmt(r.front_peak)}</td>
+      <td>${fmt(r.smoothness_scale,3)}</td>
+      <td>${(r.undersampled_fraction*100).toFixed(1)}%</td>
+      <td>${r.bookkeeping_residual.toExponential(2)}</td>
+      <td>${r.caustic_back}</td></tr>`).join("");
+    setStatus("收敛实验完成：观察“相对首档”应接近 1（能量归一化），欠采样比例随 N 下降。", "good");
+  } catch (e) {
+    $("errorBox").textContent = "收敛实验失败：" + e.message;
+    setStatus("收敛实验失败。", "bad");
+  } finally { btn.disabled = false; }
+}
+
+$("renderBtn").addEventListener("click", doRender);
+$("convergeBtn").addEventListener("click", doConvergence);
+doRender();
+</script>
+</body>
+</html>
